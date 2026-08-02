@@ -57,25 +57,25 @@ class TestAppSmoke(unittest.TestCase):
 
     def test_initial_render(self):
         self.assertEqual(self.app.phase_label.cget("text"), "专注")
-        self.assertEqual(self.app.start_btn.cget("text"), "开始")
+        self.assertEqual(self.app.start_btn.text, "开始")
         self.assertEqual(
-            self.app.canvas.itemcget(self.app._time_item, "text"), "25:00"
+            self.app.clock_canvas.itemcget(self.app._time_item, "text"), "25:00"
         )
 
     def test_start_then_tick_updates_time_and_button(self):
         self.app._on_start_pause()  # 时钟 0 开始 → 结束于 1500
         self.root.update()
-        self.assertEqual(self.app.start_btn.cget("text"), "暂停")
+        self.assertEqual(self.app.start_btn.text, "暂停")
         self.clock.value = 1498.0
         self.app._tick()
         self.root.update()
         self.assertEqual(
-            self.app.canvas.itemcget(self.app._time_item, "text"), "00:02"
+            self.app.clock_canvas.itemcget(self.app._time_item, "text"), "00:02"
         )
         # 暂停回退
         self.app._on_start_pause()
         self.root.update()
-        self.assertEqual(self.app.start_btn.cget("text"), "继续")
+        self.assertEqual(self.app.start_btn.text, "继续")
 
     def test_completion_shows_popup_and_advances_phase(self):
         # 时钟拨到专注结束点(auto_start_next 默认开启)
@@ -95,14 +95,15 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(self.root.attributes("-topmost"), 0)
 
     def test_dots_reflect_rounds(self):
-        # 完成一次专注 → 轮次圆点第 1 个变亮
+        # 完成一次专注 → 轮次圆点第 1 个内圆变为阶段色
         self.app._on_start_pause()
         self.clock.value = 1500.0
         self.app._tick()
         self.root.update()
         self.assertEqual(self.app.core.completed_focus_rounds(), 1)
         self.assertEqual(
-            self.app._dots[0].cget("text_color"), PHASE_COLORS[Phase.SHORT_BREAK]
+            self.app.dots_canvas.itemcget(self.app._dot_items[0][1], "fill"),
+            PHASE_COLORS[Phase.SHORT_BREAK],
         )
 
 
