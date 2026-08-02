@@ -27,7 +27,8 @@ def main() -> None:
     _set_dpi_awareness()
 
     cfg = config.load()
-    ctk.set_appearance_mode(cfg["theme"])
+    # 轻拟物为统一浅色配色,固定 light 主题(theme 配置不再影响外观)
+    ctk.set_appearance_mode("light")
 
     core = TimerCore(config.durations(cfg))
 

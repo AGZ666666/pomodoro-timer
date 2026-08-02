@@ -1,21 +1,28 @@
-"""番茄钟主窗口:CTk 界面、拟物时钟、tick 循环、设置对话框、完成弹窗。"""
+"""番茄钟主窗口:CTk 界面、轻拟物时钟、tick 循环、设置对话框、完成弹窗。"""
 
 import math
 import time
 import tkinter as tk
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw, ImageTk
 
 import config
 import sound
 from timer_core import Phase, Status, TimerCore
 
-# 各阶段主题色:专注红 / 短休绿 / 长休蓝
+# ---- 统一配色(coolors.co/palette/03045e-0077b6-00b4d8-90e0ef-caf0f8) ----
+INK = "#03045e"      # 深海军蓝:主文字 / 长休息
+PRIMARY = "#0077b6"  # 主蓝:专注 / 主按钮
+ACCENT = "#00b4d8"   # 亮蓝青:短休息 / 进度 / 悬停
+LIGHT = "#90e0ef"    # 浅蓝青:轨道 / 未完成圆点
+PALE = "#caf0f8"     # 极浅蓝白:窗口背景
+WHITE = "#ffffff"    # 表盘 / 副按钮底
+
+# 各阶段主题色(全部取自调色板)
 PHASE_COLORS = {
-    Phase.FOCUS: "#e74c3c",
-    Phase.SHORT_BREAK: "#2ecc71",
-    Phase.LONG_BREAK: "#3498db",
+    Phase.FOCUS: PRIMARY,
+    Phase.SHORT_BREAK: ACCENT,
+    Phase.LONG_BREAK: INK,
 }
 PHASE_LABELS = {
     Phase.FOCUS: "专注",
@@ -23,28 +30,26 @@ PHASE_LABELS = {
     Phase.LONG_BREAK: "长休息",
 }
 
-# ---- 拟物钟表配色(钟面固定浅色,不随主题变,如真实时钟) ----
-BEZEL_OUTER = "#565b62"     # 表圈暗环
-BEZEL_HI = "#eef0f3"        # 表圈高光(左上)
-BEZEL_SHADOW = "#2f3338"    # 表圈阴影(右下)
-TRACK = "#9a9ea5"           # 进度槽
-FACE_CENTER = (255, 255, 255)
-FACE_EDGE = (227, 222, 210)
-FACE_HI = "#ffffff"         # 钟面内高光(上半圈)
-FACE_SHADOW = "#b3ada1"     # 钟面内阴影(下半圈)
-TIME_COLOR = "#34383e"      # 时间文字(深灰)
-TICK_MIN = "#9a948a"        # 分钟刻度
-TICK_HOUR = "#5a554d"       # 整点刻度
-DOT_INACTIVE = "#c7c1b6"    # 未完成轮次圆点
-DOT_RIM = "#e8e3d8"         # 圆点托底
+# ---- 轻拟物配色(浅色固定,不随系统主题,如华为时钟) ----
+TRACK = LIGHT             # 进度槽
+FACE = WHITE              # 表盘底色
+FACE_RIM = LIGHT          # 表盘描边
+SHADOW_RING = LIGHT       # 表盘外投影(右下)
+HILITE_RING = WHITE       # 表盘外投影高光(左上)
+TIME_COLOR = INK          # 时间文字
+TICK_MIN = LIGHT          # 分钟刻度
+TICK_HOUR = PRIMARY       # 整点刻度
+DOT_INACTIVE = LIGHT      # 未完成轮次圆点
+DOT_RIM = WHITE           # 圆点托底
+SUB_TEXT = LIGHT          # "POMODORO" 小字
 
-# 按钮配色 (底色, 悬停, 描边, 高光, 阴影);开始按钮基色复用阶段红,单一来源
-BTN_MAIN_IDLE = (PHASE_COLORS[Phase.FOCUS], "#f05c4c", "#a93226", "#ffb8ad", "#8a2218")
-BTN_MAIN_RUN = ("#f39c12", "#f7a92e", "#b9770e", "#ffe2a6", "#96700a")
-BTN_MAIN_RESUME = ("#27ae60", "#33c06f", "#186a3b", "#a9e9c2", "#144e2e")
-BTN_SECONDARY = ("#dcdee3", "#e6e8ec", "#a5a9b0", "#ffffff", "#82878e")
-BTN_SECONDARY_FG = "#43464c"
-ERROR_COLOR = "#e74c3c"
+# 按钮配色 (底色, 悬停, 描边, 高光, 阴影);开始按钮基色复用阶段蓝,单一来源
+BTN_MAIN_IDLE = (PRIMARY, ACCENT, "#015a8c", "#d6f2fa", "#015a8c")
+BTN_MAIN_RUN = (ACCENT, PRIMARY, "#02749c", "#e8f9fd", "#02749c")
+BTN_MAIN_RESUME = (INK, "#1a2a6e", "#02032f", "#6d7ba6", "#02032f")
+BTN_SECONDARY = (WHITE, PALE, LIGHT, WHITE, "#a9cfdf")
+BTN_SECONDARY_FG = INK
+ERROR_COLOR = "#e74c3c"  # 报错红,与蓝系对比清晰
 
 # 状态 → 主按钮 (文案, 配色) 查表驱动
 BTN_STATES = {
@@ -54,21 +59,11 @@ BTN_STATES = {
 }
 
 FONT_FAMILY = "Microsoft YaHei UI"
+TIME_FONT = ("Segoe UI Light", 46)  # 华为时钟式细体数字
 TICK_MS = 200
 RING_FULL_SWEEP = -359.9  # tk 全圆 arc 不渲染,需小于 360 的扫角
 CLOCK = 250  # 时钟画布边长
-
-
-def _face_gradient(size: int, face_r: int) -> Image.Image:
-    """钟面径向渐变贴图:中心白 → 边缘米灰。逐环描边(2px 环带)而非整圆填充。"""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    cx = cy = size // 2
-    for r in range(face_r, 0, -2):
-        k = (r / face_r) ** 2
-        color = tuple(int(FACE_CENTER[i] + (FACE_EDGE[i] - FACE_CENTER[i]) * k) for i in range(3))
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(*color, 255), width=2)
-    return img
+BG = PALE    # 窗口 / 画布统一底色
 
 
 def _center_on(win, parent) -> None:
@@ -80,7 +75,7 @@ def _center_on(win, parent) -> None:
 
 
 class SkeuoButton:
-    """Canvas 拟物按钮:圆角主体 + 顶部高光 + 底部阴影;悬停提亮,按下凹陷。
+    """Canvas 轻拟物按钮:圆角主体 + 顶部高光 + 底部阴影;悬停提亮,按下凹陷。
 
     几何在构造时创建一次(共享 tag 统一绑定事件),状态变化只做
     itemconfig/coords 增量更新,不重建画布对象。
@@ -206,23 +201,16 @@ class PomodoroApp:
         self._popup = None
         self._last = (None, None)  # 上次渲染的 (phase, status),避免重复 configure
 
-        self._dark = ctk.get_appearance_mode().lower() == "dark"
-        self._frame_bg = self._theme_frame_bg()
-
         root.title("番茄钟")
         root.geometry("380x520")
         root.resizable(False, False)
+        root.configure(fg_color=BG)  # 统一浅蓝白背景
 
         self._build_ui()
         self._apply_always_on_top(self.cfg["always_on_top"], save=False)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._sync_tick_loop()
         self._render()
-
-    def _theme_frame_bg(self) -> str:
-        """CTkFrame 主题底色(各 Canvas 与窗口同色,避免方形色块)。"""
-        fg = ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
-        return fg[1] if self._dark else fg[0]
 
     # ---------- 界面搭建 ----------
 
@@ -237,7 +225,7 @@ class PomodoroApp:
         )
         self.phase_label.pack(pady=(16, 4))
 
-        # ---- 拟物时钟 ----
+        # ---- 轻拟物时钟 ----
         self.clock_canvas = self._new_canvas(CLOCK, CLOCK)
         self.clock_canvas.pack()
         self._build_clock()
@@ -248,12 +236,12 @@ class PomodoroApp:
         self._dot_items = []
         self._rebuild_dots(self.cfg["rounds_before_long_break"])
 
-        # ---- 控制按钮(拟物) ----
+        # ---- 控制按钮(轻拟物) ----
         self.btns_canvas = self._new_canvas(360, 60)
         self.btns_canvas.pack(pady=(12, 0))
         self.start_btn = SkeuoButton(
             self.btns_canvas, 105, 8, 150, 44, "开始", BTN_MAIN_IDLE,
-            "#ffffff", ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            WHITE, ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
             self._on_start_pause,
         )
         self.reset_btn = SkeuoButton(
@@ -274,6 +262,7 @@ class PomodoroApp:
             bottom_row, text="设置", width=80, height=30,
             corner_radius=10,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            fg_color=PRIMARY, hover_color=ACCENT, text_color=WHITE,
             command=self._open_settings,
         )
         self.settings_btn.pack(side="left", padx=6)
@@ -281,12 +270,14 @@ class PomodoroApp:
         self.topmost_box = ctk.CTkCheckBox(
             bottom_row, text="窗口置顶", variable=self.topmost_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            text_color=INK, fg_color=PRIMARY, hover_color=ACCENT,
+            border_color=LIGHT,
             command=self._on_topmost_toggle,
         )
         self.topmost_box.pack(side="left", padx=6)
 
     def _new_canvas(self, w: int, h: int) -> tk.Canvas:
-        c = tk.Canvas(self.root, width=w, height=h, bg=self._frame_bg, highlightthickness=0)
+        c = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
         self._canvases.append(c)
         return c
 
@@ -295,41 +286,35 @@ class PomodoroApp:
     def _build_clock(self) -> None:
         c = self.clock_canvas
         cx = cy = CLOCK // 2
-        # 表圈:暗色金属环 + 左上高光 / 右下阴影
-        c.create_oval(12, 12, CLOCK - 12, CLOCK - 12, width=10, outline=BEZEL_OUTER)
-        c.create_arc(12, 12, CLOCK - 12, CLOCK - 12, start=135, extent=70,
-                     style="arc", width=2.5, outline=BEZEL_HI)
-        c.create_arc(12, 12, CLOCK - 12, CLOCK - 12, start=315, extent=70,
-                     style="arc", width=2.5, outline=BEZEL_SHADOW)
+        # 轻拟物外投影:右下淡蓝弧 + 左上白高光弧(柔和凸起感)
+        c.create_arc(8, 8, CLOCK - 8, CLOCK - 8, start=35, extent=180,
+                     style="arc", width=13, outline=SHADOW_RING)
+        c.create_arc(8, 8, CLOCK - 8, CLOCK - 8, start=215, extent=180,
+                     style="arc", width=13, outline=HILITE_RING)
+        # 白色表盘 + 细描边
+        c.create_oval(16, 16, CLOCK - 16, CLOCK - 16, fill=FACE,
+                      outline=FACE_RIM, width=1.5)
         # 进度槽 + 进度弧
-        c.create_oval(22, 22, CLOCK - 22, CLOCK - 22, width=8, outline=TRACK)
-        self._progress_arc = c.create_arc(22, 22, CLOCK - 22, CLOCK - 22,
+        c.create_oval(30, 30, CLOCK - 30, CLOCK - 30, width=8, outline=TRACK)
+        self._progress_arc = c.create_arc(30, 30, CLOCK - 30, CLOCK - 30,
                                           start=90, extent=0, style="arc", width=8,
                                           outline=PHASE_COLORS[Phase.FOCUS])
-        # 钟面(径向渐变)+ 内阴影 / 内高光
-        face_r = (CLOCK - 60) // 2
-        self._face_img = ImageTk.PhotoImage(_face_gradient(CLOCK, face_r))
-        c.create_image(0, 0, image=self._face_img, anchor="nw")
-        c.create_arc(30, 30, CLOCK - 30, CLOCK - 30, start=15, extent=150,
-                     style="arc", width=3, outline=FACE_SHADOW)
-        c.create_arc(30, 30, CLOCK - 30, CLOCK - 30, start=195, extent=150,
-                     style="arc", width=3, outline=FACE_HI)
         # 刻度:60 个分钟刻度 + 12 个整点刻度
         self._draw_ticks(cx, cy)
-        # 时间文字 + 小字装饰
-        self._time_item = c.create_text(cx, cy - 2, text="25:00",
-                                        font=(FONT_FAMILY, 40, "bold"), fill=TIME_COLOR)
-        c.create_text(cx, cy + 36, text="POMODORO",
-                      font=(FONT_FAMILY, 9), fill="#a49e92")
+        # 时间文字(细体)+ 小字装饰
+        self._time_item = c.create_text(cx, cy - 4, text="25:00",
+                                        font=TIME_FONT, fill=TIME_COLOR)
+        c.create_text(cx, cy + 42, text="POMODORO",
+                      font=(FONT_FAMILY, 9), fill=SUB_TEXT)
 
     def _draw_ticks(self, cx: int, cy: int) -> None:
         c = self.clock_canvas
         for i in range(60):
             ang = math.radians(90 + i * 6)  # 12 点方向起,顺时针
             if i % 5 == 0:  # 整点刻度:长而粗
-                r_out, r_in, width, color = 91, 79, 2.5, TICK_HOUR
+                r_out, r_in, width, color = 102, 90, 2.5, TICK_HOUR
             else:  # 分钟刻度:短而细
-                r_out, r_in, width, color = 88, 82, 1, TICK_MIN
+                r_out, r_in, width, color = 99, 93, 1, TICK_MIN
             x1, y1 = cx + r_out * math.cos(ang), cy - r_out * math.sin(ang)
             x2, y2 = cx + r_in * math.cos(ang), cy - r_in * math.sin(ang)
             c.create_line(x1, y1, x2, y2, width=width, fill=color)
@@ -348,7 +333,7 @@ class PomodoroApp:
             y = 12
             inner = c.create_oval(cx - 6, y - 6, cx + 6, y + 6, outline="")
             hi = c.create_arc(cx - 5, y - 5, cx + 5, y + 5, start=135, extent=100,
-                              style="arc", width=1.5, outline="#ffffff", state="hidden")
+                              style="arc", width=1.5, outline=WHITE, state="hidden")
             self._dot_items.append([
                 c.create_oval(cx - 9, y - 9, cx + 9, y + 9, fill=DOT_RIM, outline=""),
                 inner,
@@ -374,14 +359,6 @@ class PomodoroApp:
         """把 core 状态渲染到界面;仅时间/进度环每 tick 更新,其余按需重配。"""
         phase = self.core.phase()
         status = self.core.status()
-
-        # 系统主题下 OS 亮暗翻转时刷新各 Canvas 底色
-        dark = ctk.get_appearance_mode().lower() == "dark"
-        if dark != self._dark:
-            self._dark = dark
-            self._frame_bg = self._theme_frame_bg()
-            for cv in self._canvases:
-                cv.configure(bg=self._frame_bg)
 
         # 阶段/状态相关项:仅在状态切换时重配
         if (phase, status) != self._last:
@@ -496,6 +473,7 @@ class PomodoroApp:
         popup.attributes("-topmost", True)
         popup.resizable(False, False)
         popup.grab_set()  # 模态:需要点确定
+        popup.configure(fg_color=BG)
 
         if phase is Phase.FOCUS:
             title = "专注结束!"
@@ -516,10 +494,12 @@ class PomodoroApp:
         ctk.CTkLabel(
             popup, text=sub,
             font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            text_color=INK,
         ).pack(padx=40, pady=(0, 8))
         ctk.CTkButton(
             popup, text="确定", width=120, height=34,
             font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            fg_color=PRIMARY, hover_color=ACCENT, text_color=WHITE,
             command=lambda: (popup.grab_release(), popup.destroy()),
         ).pack(pady=(8, 22))
 
@@ -569,6 +549,7 @@ class SettingsDialog:
         win.resizable(False, False)
         win.transient(app.root)
         win.grab_set()
+        win.configure(fg_color=BG)
 
         pad = {"padx": 18, "pady": 5}
         entries = {}
@@ -585,12 +566,13 @@ class SettingsDialog:
             ctk.CTkLabel(
                 row, text=label,
                 font=ctk.CTkFont(family=FONT_FAMILY, size=13),
-                width=150, anchor="w",
+                width=150, anchor="w", text_color=INK,
             ).pack(side="left")
             var = ctk.StringVar(value=str(self.cfg[key]))
             entry = ctk.CTkEntry(
                 row, textvariable=var, width=80,
                 font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+                fg_color=WHITE, border_color=LIGHT, text_color=INK,
             )
             entry.pack(side="right")
             entries[key] = var
@@ -600,6 +582,8 @@ class SettingsDialog:
         ctk.CTkCheckBox(
             win, text="提示声音", variable=self.sound_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            text_color=INK, fg_color=PRIMARY, hover_color=ACCENT,
+            border_color=LIGHT,
         ).pack(anchor="w", **pad)
 
         self.volume_var = ctk.DoubleVar(value=self.cfg["volume"] * 100)
@@ -608,15 +592,19 @@ class SettingsDialog:
         ctk.CTkLabel(
             vol_row, text="音量", width=150, anchor="w",
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            text_color=INK,
         ).pack(side="left")
         slider = ctk.CTkSlider(
             vol_row, from_=0, to=100, variable=self.volume_var, width=120,
+            fg_color=LIGHT, progress_color=ACCENT,
+            button_color=PRIMARY, button_hover_color=ACCENT,
             command=self._on_volume,
         )
         slider.pack(side="left", padx=(0, 8))
         self.vol_label = ctk.CTkLabel(
             vol_row, text=f"{int(self.volume_var.get())}%", width=40,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            text_color=INK,
         )
         self.vol_label.pack(side="left")
 
@@ -624,6 +612,8 @@ class SettingsDialog:
         ctk.CTkCheckBox(
             win, text="自动开始下一轮", variable=self.auto_var,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            text_color=INK, fg_color=PRIMARY, hover_color=ACCENT,
+            border_color=LIGHT,
         ).pack(anchor="w", **pad)
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
@@ -631,11 +621,14 @@ class SettingsDialog:
         ctk.CTkButton(
             btn_row, text="取消", width=90,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            fg_color=WHITE, hover_color=PALE, text_color=INK,
+            border_width=1, border_color=LIGHT,
             command=self._close,
         ).pack(side="left", padx=8)
         ctk.CTkButton(
             btn_row, text="保存", width=90,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            fg_color=PRIMARY, hover_color=ACCENT, text_color=WHITE,
             command=self._save,
         ).pack(side="left", padx=8)
 
