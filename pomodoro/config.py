@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "auto_start_next": True,
     "always_on_top": False,
     "theme": "system",  # system | light | dark
+    "github_token": "",  # 私有仓库检查更新用(GitHub PAT,可留空)
 }
 
 

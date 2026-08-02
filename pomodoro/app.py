@@ -1,14 +1,19 @@
 """番茄钟主窗口:CTk 界面、轻拟物时钟、tick 循环、设置对话框、完成弹窗。"""
 
 import math
+import threading
 import time
 import tkinter as tk
+import urllib.error
+import webbrowser
 
 import customtkinter as ctk
 
 import config
 import sound
+import updater
 from timer_core import Phase, Status, TimerCore
+from version import APP_VERSION
 
 # ---- 统一配色(coolors.co/palette/03045e-0077b6-00b4d8-90e0ef-caf0f8) ----
 INK = "#03045e"      # 深海军蓝:主文字 / 长休息
@@ -199,6 +204,8 @@ class PomodoroApp:
         self.hidden = False  # 是否隐藏到托盘(托盘线程只读此标志)
         self._after_id = None
         self._popup = None
+        self._update_popup = None
+        self._update_thread = None  # 更新检查线程(防重复点击)
         self._last = (None, None)  # 上次渲染的 (phase, status),避免重复 configure
 
         root.title("番茄钟")
@@ -211,6 +218,8 @@ class PomodoroApp:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._sync_tick_loop()
         self._render()
+        # 启动后延迟自动检查更新(失败静默)
+        root.after(3000, self._auto_check)
 
     # ---------- 界面搭建 ----------
 
@@ -275,6 +284,15 @@ class PomodoroApp:
             command=self._on_topmost_toggle,
         )
         self.topmost_box.pack(side="left", padx=6)
+        self.update_btn = ctk.CTkButton(
+            bottom_row, text="检查更新", width=80, height=30,
+            corner_radius=10,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            fg_color=WHITE, hover_color=PALE, text_color=INK,
+            border_width=1, border_color=LIGHT,
+            command=self._on_check_update,
+        )
+        self.update_btn.pack(side="left", padx=6)
 
     def _new_canvas(self, w: int, h: int) -> tk.Canvas:
         c = tk.Canvas(self.root, width=w, height=h, bg=BG, highlightthickness=0)
@@ -436,6 +454,97 @@ class PomodoroApp:
             self.topmost_var.set(on)
         if save:
             config.save(self.cfg)
+
+    # ---------- 更新检查 ----------
+
+    def _auto_check(self) -> None:
+        """启动后自动检查一次;失败/已最新一律静默,仅新版本弹窗。"""
+        if self._update_thread is None or not self._update_thread.is_alive():
+            self._update_thread = threading.Thread(
+                target=self._check_worker, args=(True,), daemon=True)
+            self._update_thread.start()
+
+    def _on_check_update(self) -> None:
+        """手动检查更新(按钮);失败时明确提示。"""
+        if self._update_thread is not None and self._update_thread.is_alive():
+            return  # 检查中,忽略重复点击
+        self.update_btn.configure(state="disabled")
+        self._update_thread = threading.Thread(
+            target=self._check_worker, args=(False,), daemon=True)
+        self._update_thread.start()
+
+    def _check_worker(self, silent: bool) -> None:
+        """网络请求在线程执行,避免阻塞 UI;结果经 after 编组回主线程。"""
+        try:
+            result = updater.check_update(APP_VERSION, token=self.cfg.get("github_token", ""))
+        except urllib.error.HTTPError as e:
+            result = ("http_error", e.code)
+        except Exception:
+            result = "error"
+        self.root.after(0, lambda: self._finish_check(result, silent))
+
+    def _finish_check(self, result, silent: bool) -> None:
+        self.update_btn.configure(state="normal")
+        if result == "error":
+            if not silent:
+                self._show_update_popup("检查失败", "无法连接更新服务器,请检查网络")
+        elif isinstance(result, tuple) and result[0] == "http_error":
+            # 区分 GitHub 端拒绝与网络不通:404=仓库私有或暂无 Release,401=token 无效
+            msg = {
+                401: "授权失败,请检查 GitHub Token 配置",
+                404: "未发现可用更新信息\n(仓库暂无 Release 发布)",
+            }.get(result[1], f"更新服务器错误 (HTTP {result[1]})")
+            if not silent:
+                self._show_update_popup("检查失败", msg)
+        elif result is None:
+            if not silent:
+                self._show_update_popup("已是最新", f"当前版本 v{APP_VERSION}")
+        else:
+            self._show_update_popup(
+                "发现新版本", f"v{APP_VERSION} → v{result['version']}",
+                url=result["url"])
+
+    def _show_update_popup(self, title: str, sub: str, url: str | None = None) -> None:
+        """更新提示弹窗(单例防堆叠);有下载地址时提供"前往下载"。"""
+        if self._update_popup is not None and self._update_popup.winfo_exists():
+            self._update_popup.destroy()
+        popup = ctk.CTkToplevel(self.root)
+        self._update_popup = popup
+        popup.title("软件更新")
+        popup.attributes("-topmost", True)
+        popup.resizable(False, False)
+        popup.grab_set()  # 模态
+        popup.configure(fg_color=BG)
+
+        ctk.CTkLabel(
+            popup, text=title,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=22, weight="bold"),
+            text_color=PRIMARY,
+        ).pack(padx=40, pady=(24, 4))
+        ctk.CTkLabel(
+            popup, text=sub,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            text_color=INK,
+        ).pack(padx=40, pady=(0, 8))
+        btn_row = ctk.CTkFrame(popup, fg_color="transparent")
+        btn_row.pack(pady=(8, 22))
+        if url is not None:
+            ctk.CTkButton(
+                btn_row, text="前往下载", width=100,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+                fg_color=PRIMARY, hover_color=ACCENT, text_color=WHITE,
+                command=lambda: (popup.grab_release(), popup.destroy(),
+                                 webbrowser.open(url)),
+            ).pack(side="left", padx=8)
+        ctk.CTkButton(
+            btn_row, text="确定", width=100,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            fg_color=WHITE, hover_color=PALE, text_color=INK,
+            border_width=1, border_color=LIGHT,
+            command=lambda: (popup.grab_release(), popup.destroy()),
+        ).pack(side="left", padx=8)
+
+        _center_on(popup, self.root)
 
     # ---------- 完成流程 ----------
 

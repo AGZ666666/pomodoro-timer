@@ -36,6 +36,7 @@ build.bat
 - **tray.py — 托盘线程安全规则**。pystray `icon.run()` 在 daemon 线程,菜单回调也跑在该线程,**所有 UI 操作必须经 `root.after(0, fn)` 编组**(`_marshal`),tkinter 非线程安全。托盘创建失败时 `create()` 返回 None,应用退化为"关窗即退出"。托盘须在 CTk root 创建之后装配(main.py 中)。
 - **sound.py — 音量烘焙进 WAV**。winsound 无音量 API,音量经生成时的 PCM 幅度缩放实现;铃声按音量缓存(`chime_v{int(vol*100)}.wav`,幂等)。`winsound.PlaySound(..., SND_ASYNC | SND_NODEFAULT)` 异步播放不阻塞 UI。写入 `%APPDATA%\PomodoroTimer\sounds\`(不放在 exe 旁,避免只读目录问题)。
 - **config.py — 配置读写**。JSON 存 `%APPDATA%\PomodoroTimer\config.json`,加载与默认值合并、损坏回退默认值(绝不抛异常);保存用临时文件 + `os.replace` 原子写。`config.durations()` 是配置键 → TimerCore 时长键的**唯一映射处**,新增时长设置必须改这里。
+- **updater.py + version.py — 检查更新**(参考 electron-updater 的 GitHub Releases provider)。`APP_VERSION` 在 version.py,发布新版时改它并打 GitHub tag(vX.Y.Z)。`check_update()`:有新版本返回 `{"version","url"}`,已最新返回 None,网络/解析失败**抛异常**由调用方决定提示还是静默(启动 3s 后自动检查一律静默;手动按钮才弹窗)。网络请求先走环境代理再兜底 `127.0.0.1:7897`;私有仓库需在配置里填 `github_token`。
 - **main.py — 装配顺序有依赖**:DPI 感知 → 主题 → 加载配置 → TimerCore → CTk root → PomodoroApp(UI 内挂 WM_DELETE_WINDOW)→ **tray.create(root 之后)** → mainloop。打包版无控制台,启动异常用 `MessageBoxW` 弹出。
 
 ## 已知行为(勿当 bug "修复")
