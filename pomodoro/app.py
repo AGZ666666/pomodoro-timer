@@ -3,7 +3,6 @@
 import math
 import time
 import tkinter as tk
-from functools import lru_cache
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
@@ -31,6 +30,7 @@ BEZEL_SHADOW = "#2f3338"    # 表圈阴影(右下)
 TRACK = "#9a9ea5"           # 进度槽
 FACE_CENTER = (255, 255, 255)
 FACE_EDGE = (227, 222, 210)
+FACE_HI = "#ffffff"         # 钟面内高光(上半圈)
 FACE_SHADOW = "#b3ada1"     # 钟面内阴影(下半圈)
 TIME_COLOR = "#34383e"      # 时间文字(深灰)
 TICK_MIN = "#9a948a"        # 分钟刻度
@@ -38,12 +38,20 @@ TICK_HOUR = "#5a554d"       # 整点刻度
 DOT_INACTIVE = "#c7c1b6"    # 未完成轮次圆点
 DOT_RIM = "#e8e3d8"         # 圆点托底
 
-# 按钮配色 (底色, 悬停, 描边, 高光, 阴影)
-BTN_MAIN_IDLE = ("#e74c3c", "#f05c4c", "#a93226", "#ffb8ad", "#8a2218")
+# 按钮配色 (底色, 悬停, 描边, 高光, 阴影);开始按钮基色复用阶段红,单一来源
+BTN_MAIN_IDLE = (PHASE_COLORS[Phase.FOCUS], "#f05c4c", "#a93226", "#ffb8ad", "#8a2218")
 BTN_MAIN_RUN = ("#f39c12", "#f7a92e", "#b9770e", "#ffe2a6", "#96700a")
 BTN_MAIN_RESUME = ("#27ae60", "#33c06f", "#186a3b", "#a9e9c2", "#144e2e")
 BTN_SECONDARY = ("#dcdee3", "#e6e8ec", "#a5a9b0", "#ffffff", "#82878e")
 BTN_SECONDARY_FG = "#43464c"
+ERROR_COLOR = "#e74c3c"
+
+# 状态 → 主按钮 (文案, 配色) 查表驱动
+BTN_STATES = {
+    Status.RUNNING: ("暂停", BTN_MAIN_RUN),
+    Status.PAUSED: ("继续", BTN_MAIN_RESUME),
+    Status.IDLE: ("开始", BTN_MAIN_IDLE),
+}
 
 FONT_FAMILY = "Microsoft YaHei UI"
 TICK_MS = 200
@@ -51,16 +59,15 @@ RING_FULL_SWEEP = -359.9  # tk 全圆 arc 不渲染,需小于 360 的扫角
 CLOCK = 250  # 时钟画布边长
 
 
-@lru_cache(maxsize=4)
 def _face_gradient(size: int, face_r: int) -> Image.Image:
-    """钟面径向渐变贴图:中心白 → 边缘米灰(逐环填充,一次生成,缓存)。"""
+    """钟面径向渐变贴图:中心白 → 边缘米灰。逐环描边(2px 环带)而非整圆填充。"""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     cx = cy = size // 2
     for r in range(face_r, 0, -2):
         k = (r / face_r) ** 2
         color = tuple(int(FACE_CENTER[i] + (FACE_EDGE[i] - FACE_CENTER[i]) * k) for i in range(3))
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*color, 255))
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(*color, 255), width=2)
     return img
 
 
@@ -73,7 +80,11 @@ def _center_on(win, parent) -> None:
 
 
 class SkeuoButton:
-    """Canvas 拟物按钮:圆角主体 + 顶部高光 + 底部阴影;悬停提亮,按下凹陷。"""
+    """Canvas 拟物按钮:圆角主体 + 顶部高光 + 底部阴影;悬停提亮,按下凹陷。
+
+    几何在构造时创建一次(共享 tag 统一绑定事件),状态变化只做
+    itemconfig/coords 增量更新,不重建画布对象。
+    """
 
     def __init__(self, canvas, x, y, w, h, text, palette, fg, font, command) -> None:
         self.canvas = canvas
@@ -84,11 +95,29 @@ class SkeuoButton:
         self.fg = fg
         self.font = font
         self.command = command
-        self._pressed = False
-        self._hover = False
-        self._items = []
+        self._state = 0  # 0 常态 / 1 悬停 / 2 按下
+        self._body = None
+        self._hi_line = None
+        self._sh_line = None
         self._text_id = None
-        self._redraw()
+
+        tag = f"skeuo-{id(self)}"
+        c = self.canvas
+        x0, y0, x1, y1 = x, y, x + w, y + h
+        self._body = self._round_rect(x0, y0, x1, y1,
+                                      fill=palette[0], outline=palette[2], width=1,
+                                      tags=tag)
+        self._hi_line = c.create_line(x0 + self.r, y0 + 2, x1 - self.r, y0 + 2,
+                                      fill=palette[3], width=1, tags=tag)
+        self._sh_line = c.create_line(x0 + self.r, y1 - 3, x1 - self.r, y1 - 3,
+                                      fill=palette[4], width=1, tags=tag)
+        self._text_id = c.create_text(x0 + w // 2, y0 + h // 2, text=text,
+                                      font=font, fill=fg, tags=tag)
+        # 事件只对 tag 绑定一次,重绘不再需要重绑
+        c.tag_bind(tag, "<Enter>", self._on_enter)
+        c.tag_bind(tag, "<Leave>", self._on_leave)
+        c.tag_bind(tag, "<Button-1>", self._on_press)
+        c.tag_bind(tag, "<ButtonRelease-1>", self._on_release)
 
     # ---------- 绘制 ----------
 
@@ -102,67 +131,66 @@ class SkeuoButton:
         ]
         return self.canvas.create_polygon(pts, smooth=True, **kw)
 
-    def _redraw(self) -> None:
-        for it in self._items:
-            self.canvas.delete(it)
-        self._items = []
+    def _sync(self) -> None:
+        """按当前状态增量更新:颜色走 itemconfig,1px 位移走 coords。"""
         c = self.canvas
         x, y, w, h = self.x, self.y, self.w, self.h
         base, hover, border, hi, shadow = self.palette
-        fill = hover if self._hover else base
-        if self._pressed:
-            # 凹陷:主体下移 1px,高光移到下边,阴影压上边
-            body_y, hi_y, sh_y, ty = y + 1, h - 3, 2, y + h // 2 + 1
-        else:
-            body_y, hi_y, sh_y, ty = y, 2, h - 3, y + h // 2
-        self._items.append(self._round_rect(x, body_y, x + w, body_y + h,
-                                            fill=fill, outline=border, width=1))
-        # 顶部高光 / 底部阴影细线(浮雕感)
-        self._items.append(c.create_line(x + self.r, body_y + hi_y, x + w - self.r,
-                                         body_y + hi_y, fill=hi, width=1))
-        self._items.append(c.create_line(x + self.r, body_y + sh_y, x + w - self.r,
-                                         body_y + sh_y, fill=shadow, width=1))
-        self._text_id = c.create_text(x + w // 2, ty, text=self.text,
-                                      font=self.font, fill=self.fg)
-        self._items.append(self._text_id)
-        for it in self._items:
-            c.tag_bind(it, "<Enter>", self._on_enter)
-            c.tag_bind(it, "<Leave>", self._on_leave)
-            c.tag_bind(it, "<Button-1>", self._on_press)
-            c.tag_bind(it, "<ButtonRelease-1>", self._on_release)
+        pressed = self._state == 2
+        dy = 1 if pressed else 0
+        # 主体:按下时整体下移 1px
+        pts = self._round_pts(x, y + dy, x + w, y + dy + h)
+        c.coords(self._body, *pts)
+        c.itemconfig(self._body,
+                     fill=hover if self._state == 1 else base, outline=border)
+        # 浮雕线:按下时高光移到下边、阴影压上边(凹陷)
+        hi_y = h - 3 if pressed else 2
+        sh_y = 2 if pressed else h - 3
+        c.coords(self._hi_line, x + self.r, y + hi_y + dy, x + w - self.r, y + hi_y + dy)
+        c.coords(self._sh_line, x + self.r, y + sh_y + dy, x + w - self.r, y + sh_y + dy)
+        c.itemconfig(self._hi_line, fill=hi)
+        c.itemconfig(self._sh_line, fill=shadow)
+        # 文字同步位移
+        c.coords(self._text_id, x + w // 2, y + h // 2 + dy)
+
+    def _round_pts(self, x0, y0, x1, y1) -> tuple:
+        r = self.r
+        return (
+            x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r,
+            x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
+            x0, y1, x0, y1 - r, x0, y0 + r, x0, y0,
+        )
 
     # ---------- 事件 ----------
 
     def _on_enter(self, _e) -> None:
-        self._hover = True
-        self._redraw()
+        if self._state == 0:
+            self._state = 1
+            self._sync()
 
     def _on_leave(self, _e) -> None:
-        self._hover = False
-        self._pressed = False
-        self._redraw()
+        self._state = 0
+        self._sync()
 
     def _on_press(self, _e) -> None:
-        self._pressed = True
-        self._redraw()
+        self._state = 2
+        self._sync()
 
     def _on_release(self, _e) -> None:
-        if not self._pressed:
-            return
-        self._pressed = False
-        self._redraw()
-        if self._hover:
-            self.command()
+        if self._state != 2:
+            return  # 按下期间已拖出(leave 已把状态归零)
+        self._state = 1  # 鼠标仍在按钮上
+        self._sync()
+        self.command()
 
     # ---------- 动态更新 ----------
 
-    def set_text(self, text: str) -> None:
+    def set_state(self, text: str, palette) -> None:
+        """一次更新文案与配色(内部一次增量同步,不重建)。"""
         self.text = text
-        self.canvas.itemconfig(self._text_id, text=text)
-
-    def set_palette(self, palette) -> None:
         self.palette = palette
-        self._redraw()
+        self.canvas.itemconfig(self._text_id, text=text)
+        self._sync()
 
 
 class PomodoroApp:
@@ -285,7 +313,7 @@ class PomodoroApp:
         c.create_arc(30, 30, CLOCK - 30, CLOCK - 30, start=15, extent=150,
                      style="arc", width=3, outline=FACE_SHADOW)
         c.create_arc(30, 30, CLOCK - 30, CLOCK - 30, start=195, extent=150,
-                     style="arc", width=3, outline="#ffffff")
+                     style="arc", width=3, outline=FACE_HI)
         # 刻度:60 个分钟刻度 + 12 个整点刻度
         self._draw_ticks(cx, cy)
         # 时间文字 + 小字装饰
@@ -308,36 +336,37 @@ class PomodoroApp:
 
     # ---------- 轮次圆点 ----------
 
-    def _draw_dot(self, idx: int, count: int, done: int, phase_color: str) -> list:
-        """单个圆点:托底圆环 + 内圆 + 左上高光(拟物)。返回该圆点的画布元素列表。"""
-        c = self.dots_canvas
-        cx = 160 + (idx - (count - 1) / 2) * 36
-        y = 12
-        active = idx < done
-        fill = phase_color if active else DOT_INACTIVE
-        items = [
-            c.create_oval(cx - 9, y - 9, cx + 9, y + 9, fill=DOT_RIM, outline=""),
-            c.create_oval(cx - 6, y - 6, cx + 6, y + 6, fill=fill, outline=""),
-        ]
-        if active:
-            items.append(c.create_arc(cx - 5, y - 5, cx + 5, y + 5, start=135, extent=100,
-                                      style="arc", width=1.5, outline="#ffffff"))
-        return items
-
-    def _rebuild_dots(self, count: int) -> None:
-        """按长休间隔轮数重建圆点行(设置变更后调用)。"""
-        done = self.core.completed_focus_rounds()
-        self._draw_dots(done, PHASE_COLORS[self.core.phase()])
-
-    def _draw_dots(self, done: int, phase_color: str) -> None:
+    def _build_dots(self, count: int, done: int, phase_color: str) -> None:
+        """创建轮次圆点行(每点 3 个元素:托底环/内圆/高光弧),并按当前状态着色。"""
         for items in self._dot_items:
             for it in items:
                 self.dots_canvas.delete(it)
         self._dot_items = []
-        for i in range(self.cfg["rounds_before_long_break"]):
-            self._dot_items.append(
-                self._draw_dot(i, self.cfg["rounds_before_long_break"], done, phase_color)
-            )
+        c = self.dots_canvas
+        for i in range(count):
+            cx = 160 + (i - (count - 1) / 2) * 36
+            y = 12
+            inner = c.create_oval(cx - 6, y - 6, cx + 6, y + 6, outline="")
+            hi = c.create_arc(cx - 5, y - 5, cx + 5, y + 5, start=135, extent=100,
+                              style="arc", width=1.5, outline="#ffffff", state="hidden")
+            self._dot_items.append([
+                c.create_oval(cx - 9, y - 9, cx + 9, y + 9, fill=DOT_RIM, outline=""),
+                inner,
+                hi,
+            ])
+        self._update_dots(done, phase_color)
+
+    def _update_dots(self, done: int, phase_color: str) -> None:
+        """只做着色:内圆变色、高光弧显隐(不重建几何)。"""
+        for i, (_, inner, hi) in enumerate(self._dot_items):
+            active = i < done
+            self.dots_canvas.itemconfig(inner, fill=phase_color if active else DOT_INACTIVE)
+            self.dots_canvas.itemconfig(hi, state="normal" if active else "hidden")
+
+    def _rebuild_dots(self, count: int) -> None:
+        """设置变更(轮数变化)时重建圆点行几何。"""
+        self._build_dots(count, self.core.completed_focus_rounds(),
+                         PHASE_COLORS[self.core.phase()])
 
     # ---------- 显示更新 ----------
 
@@ -360,16 +389,9 @@ class PomodoroApp:
             done = self.core.completed_focus_rounds()
             self.phase_label.configure(text=PHASE_LABELS[phase], text_color=PHASE_COLORS[phase])
             self.clock_canvas.itemconfig(self._progress_arc, outline=PHASE_COLORS[phase])
-            self._draw_dots(done, PHASE_COLORS[phase])
-            if status is Status.RUNNING:
-                self.start_btn.set_text("暂停")
-                self.start_btn.set_palette(BTN_MAIN_RUN)
-            elif status is Status.PAUSED:
-                self.start_btn.set_text("继续")
-                self.start_btn.set_palette(BTN_MAIN_RESUME)
-            else:
-                self.start_btn.set_text("开始")
-                self.start_btn.set_palette(BTN_MAIN_IDLE)
+            self._update_dots(done, PHASE_COLORS[phase])
+            text, palette = BTN_STATES[status]
+            self.start_btn.set_state(text, palette)
 
         # 每 tick 必变:进度弧与时间
         remaining = int(self.core.remaining(self._now()))
@@ -664,7 +686,7 @@ class SettingsDialog:
 
     def _error(self, msg: str) -> None:
         ctk.CTkLabel(
-            self.win, text=msg, text_color=PHASE_COLORS[Phase.FOCUS],
+            self.win, text=msg, text_color=ERROR_COLOR,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         ).pack(pady=(0, 6))
 
